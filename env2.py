@@ -140,18 +140,24 @@ class parallel_env(ParallelEnv):
             decimals=2
         )
         self.soc_desired = np.full(self.n_ev, self.soc_max)
-        self.omega = [
-            self.c1 * (e**(self.c1*(np.arange(self.departure_time[i] - self.arrival_time[i] + 24)+1) /
-                           (self.departure_time[i] - self.arrival_time[i] + 24)) - 1) / (e**self.c2 - 1)
-            for i in range(self.n_ev)
-        ]
+        # self.omega = [
+        #     self.c1 * (e**(self.c1*(np.arange(self.departure_time[i] - self.arrival_time[i] + 24)+1) /
+        #                    (self.departure_time[i] - self.arrival_time[i] + 24)) - 1) / (e**self.c2 - 1)
+        #     for i in range(self.n_ev)
+        # ]
+        self.omega = np.zeros((self.n_ev, 24 + self.departure_time.max()))
+        for i in range(self.n_ev):
+            for t in range(self.departure_time.max()):
+                if t >= self.arrival_time[i] and t < self.departure_time[i]:
+                    self.omega[i, t] = (self.c1 * (e**(self.c1*(np.arange(t - self.arrival_time[i] + 24)+1) /
+                                   (self.departure_time[i] - self.arrival_time[i] + 24)) - 1) / (e**self.c2 - 1))
 
         self.price = self.prices_train[:, self.day-1:self.day+2].flatten('F')
         self.load = self.load_train.transpose(0, 2, 1).reshape(self.load_train.shape[0], -1)
 
         self.agents = self.possible_agents[:]
         self.num_moves = 0
-        observations = {agent: 0 for agent in self.agents}
+        observations = {agent: np.zeros(53,) for agent in self.agents}
         infos = {agent: {} for agent in self.agents}
         self.state = observations
 
@@ -195,10 +201,7 @@ class parallel_env(ParallelEnv):
         punish_power = 0
 
         if total_power > self.total_power_max:
-            c = self.total_power_max / total_power
             punish_power = 1e0 * (total_power - self.total_power_max) * self.price.max()
-            for agent, action  in enumerate(actions):
-                actions[agent] *= c
 
         return punish_power
     
@@ -220,6 +223,19 @@ class parallel_env(ParallelEnv):
         reward = total_power * self.price[self.num_moves + 24]
 
         return reward
+    
+    def repair(self, actions):
+        repair_actions = {
+            agent: self.time_constraint(agent) * action
+            for agent, action in actions.items()
+        }
+        total_power = np.sum(self.load[:, self.num_moves + 24]) + sum(actions.values())
+        if total_power > self.total_power_max:
+            c = self.total_power_max / total_power
+            for agent, action  in actions.items():
+                repair_actions[agent] *= c
+
+        return repair_actions
 
     def step(self, actions):
         """
@@ -238,30 +254,39 @@ class parallel_env(ParallelEnv):
 
         self.num_moves += 1
         terminations = {
-            agent: self.num_moves > self.departure_time[self.agent_name_mapping[agent]] + 24
+            agent: self.num_moves >= self.departure_time[self.agent_name_mapping[agent]] + 24
             for agent in self.agents
         }
         env_truncation = self.num_moves >= NUM_ITERS
         truncations = {agent: env_truncation for agent in self.agents}
 
+        # rewards for all agents are placed in the rewards dictionary to be returned
+        repair_actions = self.repair(actions)
+
         delta_soc = {}  #记录Δsoc
         A = {}
-        for agent, action in actions.items():
+        for agent, action in repair_actions.items():
             agentix = self.agent_name_mapping[agent]
             self.soc[agentix] += self.charge_efficiency * action
             delta_soc[agent] = self.soc_max - self.soc[agentix]
-            A[agent] = delta_soc[agent] * self.omega[agentix][self.num_moves]
+            A[agent] = delta_soc[agent] * self.omega[agentix][self.num_moves-1]
 
-        # rewards for all agents are placed in the rewards dictionary to be returned
-        actions = {
-            agent: self.time_constraint(agent) * action
+        # punish max electric for power limit constraint and soc constriant
+        power_punish = self.get_power_punish(actions)
+        soc_punish = {
+            agent: self.get_soc_punish(agent)
             for agent, action in actions.items()
         }
-        power_punish = self.get_power_punish(actions)
-        rewards = {
-            a: -1 * (self.get_reward(a, actions[a]) + self.get_soc_punish(a) + power_punish + A[a])
-            for a in self.agents
+        # electric price for EVs
+        price = {
+            agent: self.get_reward(agent, action)
+            for agent, action in repair_actions.items()
         }
+        # curent reward
+        rewards = {
+            a: -1 * (price[a] + soc_punish[a] + power_punish + A[a])
+            for a in self.agents
+        } 
         
         # current observation is just the other player's most recent action
         observations = {
@@ -274,8 +299,9 @@ class parallel_env(ParallelEnv):
         # still be an entry for each agent
         infos = {
             agent: {'env_defined_actions': np.array(self.get_env_defined_actions(agent)), 
+                    'price': price[agent],
                     'power_pnish': power_punish, 
-                    'soc_punish': self.get_soc_punish(agent)} 
+                    'soc_punish': soc_punish[agent]} 
             for agent in self.agents
         }
 

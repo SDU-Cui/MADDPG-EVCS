@@ -68,13 +68,14 @@ agent = MADDPG(
 # Define training loop parameters
 max_steps = 1000  # Max steps
 total_steps = 0
-
+ 
 evo_steps = 10  # Evolution frequency
 
 # TRAINING LOOP
 print("AgileRL MADDPG Training...")
 pbar = trange(max_steps//evo_steps, unit="step")
-while agent.steps[-1] < max_steps:
+# while agent.steps[-1] < max_steps:
+for _ in pbar:
     state, info  = env.reset() # Reset environment at start of episode
     scores = np.zeros(num_envs)
     completed_episode_scores = []
@@ -98,7 +99,9 @@ while agent.steps[-1] < max_steps:
         # Act in environment
         next_state, reward, termination, truncation, info = env.step(action)
 
-        scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+        # scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+        scores = np.vstack((scores, np.sum(np.array(list(reward.values())).transpose(), axis=-1)))
+        # scores += np.sum(np.array(list(info['price'].values())).transpose(), axis=-1)
         total_steps += num_envs
         steps += num_envs
 
@@ -138,3 +141,7 @@ while agent.steps[-1] < max_steps:
                     'Scores': '%.3f' % np.mean(scores)})
                     #   '5 fitness avgs': '%.3f' % np.mean(agent.fitness[-5:])})
     pbar.update(steps)
+
+# 保存训练的参数
+checkpoint_path = "./model/checkpoint"
+agent.save_checkpoint(checkpoint_path)
